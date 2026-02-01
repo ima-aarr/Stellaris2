@@ -3,86 +3,105 @@ from discord.ext import commands
 import os
 import asyncio
 import logging
-from dotenv import load_dotenv
-from utils.db import Database
-from utils.assets import check_and_download_assets
+import requests
+import json
+from utils.database import Database
 
-# ロギング設定
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-logger = logging.getLogger("LuminaMain")
+# ログ設定
+logging.basicConfig(level=logging.INFO, format='%(asctime)s | %(levelname)s | %(message)s')
 
-load_dotenv()
+# インテント設定（全権限付与）
+intents = discord.Intents.all()
 
-class LuminaBot(commands.Bot):
+class RumiaBot(commands.Bot):
     def __init__(self):
-        # 全てのインテントを有効化
-        intents = discord.Intents.all()
         super().__init__(
-            command_prefix=commands.when_mentioned_or("/"),
+            command_prefix=commands.when_mentioned_or('/'),
             intents=intents,
-            help_command=None, # カスタムヘルプを使うため無効化
-            activity=discord.Activity(type=discord.ActivityType.playing, name="/help | 起動準備中...")
+            help_command=None,
+            case_insensitive=True
         )
-        self.db = Database(os.getenv("DATABASE_URL"))
-        
-        # 管理者IDリストの読み込み (環境変数 ADMIN_IDS="123,456" 形式)
-        admin_ids_str = os.getenv("ADMIN_IDS", "")
-        self.admin_ids = [int(i) for i in admin_ids_str.split(",") if i.isdigit()]
-        
-        # 特別サーバーID (機能制限用)
-        self.special_guild_id = int(os.getenv("SPECIAL_GUILD_ID", "0"))
+        self.db = Database()
+        self.admin_ids = [int(id) for id in os.getenv("ADMIN_IDS", "").split(",") if id.isdigit()]
 
     async def setup_hook(self):
-        # 1. アセット確認 (フォント/クッキー)
-        await check_and_download_assets()
+        # 1. リソースの準備 (フォントDL & Cookie生成)
+        self.prepare_resources()
         
-        # 2. DB接続
+        # 2. データベース接続
         await self.db.connect()
         
-        # 3. Cogロード
-        extensions = [
-            'cogs.general',
-            'cogs.economy',
-            'cogs.moderation',
-            'cogs.entertainment',
-            'cogs.rpg',
-            'cogs.voice'
-        ]
-        for ext in extensions:
-            try:
-                await self.load_extension(ext)
-                logger.info(f"✅ Loaded: {ext}")
-            except Exception as e:
-                logger.error(f"❌ Failed to load {ext}: {e}")
+        # 3. Cogのロード
+        await self.load_extensions()
+        
+        # 4. コマンド同期
+        # 本番環境では特定のギルドのみに即時同期するか、グローバル同期は時間を置く
+        await self.tree.sync()
+        logging.info("🌳 コマンドツリーを同期しました。")
 
-        # 4. コマンド同期 (グローバル)
-        # 注意: グローバル同期は反映に時間がかかる場合がありますが、全サーバー適用のために実行
-        try:
-            await self.tree.sync()
-            logger.info("✅ Command Tree Synced.")
-        except Exception as e:
-            logger.error(f"⚠️ Sync Error: {e}")
+    def prepare_resources(self):
+        """フォントのダウンロードとCookieファイルの生成"""
+        # フォント (Noto Sans JP)
+        if not os.path.exists("fonts"):
+            os.makedirs("fonts")
+        font_path = "fonts/NotoSansJP-Bold.ttf"
+        if not os.path.exists(font_path):
+            logging.info("📥 フォントをダウンロード中...")
+            url = "https://github.com/googlefonts/noto-cjk/raw/main/Sans/OTF/Japanese/NotoSansCJKjp-Bold.otf" # 代用URL
+            # 実際には軽量なGoogle Fontsの直リンク推奨。ここでは例として処理のみ記述
+            # 簡易的にNotoSansJPのURLを使用
+            try:
+                r = requests.get("https://github.com/google/fonts/raw/main/ofl/notosansjp/NotoSansJP-Bold.ttf", allow_redirects=True)
+                with open(font_path, "wb") as f:
+                    f.write(r.content)
+                logging.info("✅ フォントダウンロード完了")
+            except Exception as e:
+                logging.error(f"❌ フォントDL失敗: {e}")
+
+        # YouTube Cookies (環境変数 -> ファイル)
+        cookie_env = os.getenv("YOUTUBE_COOKIES")
+        if cookie_env:
+            logging.info("🍪 環境変数からcookies.txtを生成中...")
+            with open("cookies.txt", "w") as f:
+                f.write(cookie_env)
+
+    async def load_extensions(self):
+        """Cogsフォルダ内の拡張機能をロード"""
+        for filename in os.listdir('./cogs'):
+            if filename.endswith('.py'):
+                try:
+                    await self.load_extension(f'cogs.{filename[:-3]}')
+                    logging.info(f"⚙️ Loaded Cog: {filename}")
+                except Exception as e:
+                    logging.error(f"❌ Failed to load {filename}: {e}")
 
     async def on_ready(self):
-        logger.info(f"🚀 {self.user} is Ready!")
-        await self.change_presence(activity=discord.Activity(
-            type=discord.ActivityType.custom,
-            name="custom",
-            state=f"/help | {len(self.guilds)} servers | 爆速応答モード"
-        ))
+        logging.info(f"🚀 Logged in as {self.user} (ID: {self.user.id})")
+        logging.info(f"📊 導入サーバー数: {len(self.guilds)}")
+        await self.change_presence(activity=discord.Game(name="/help | Rumia Bot"))
 
-    async def on_command_error(self, ctx, error):
-        # 従来のPrefixコマンド用エラーハンドラ
-        if isinstance(error, commands.CommandOnCooldown):
-            await ctx.send(f"⏳ クールダウン中: あと {error.retry_after:.2f}秒")
-        else:
-            logger.error(f"Command Error: {error}")
+    async def close(self):
+        await self.db.close()
+        await super().close()
 
-bot = LuminaBot()
+# Botインスタンス作成と実行
+bot = RumiaBot()
+
+@bot.tree.error
+async def on_app_command_error(interaction: discord.Interaction, error: discord.app_commands.AppCommandError):
+    """グローバルエラーハンドラー"""
+    if isinstance(error, discord.app_commands.CommandOnCooldown):
+        await interaction.response.send_message(f"⏳ クールダウン中です。あと {error.retry_after:.2f} 秒お待ちください。", ephemeral=True)
+    elif isinstance(error, discord.app_commands.MissingPermissions):
+        await interaction.response.send_message("❌ 権限が不足しています。", ephemeral=True)
+    else:
+        logging.error(f"Command Error: {error}")
+        if not interaction.response.is_done():
+            await interaction.response.send_message(f"❌ エラーが発生しました: {error}", ephemeral=True)
 
 if __name__ == "__main__":
     token = os.getenv("DISCORD_TOKEN")
     if not token:
-        logger.critical("❌ DISCORD_TOKEN が設定されていません！")
+        logging.error("❌ DISCORD_TOKENが見つかりません。")
     else:
         bot.run(token)
