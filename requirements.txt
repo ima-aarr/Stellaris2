@@ -7,3 +7,4 @@ psutil
 aiohttp
 numpy
 requests
+PyNaCl>=1.5.0
