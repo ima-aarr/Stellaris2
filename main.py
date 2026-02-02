@@ -4,10 +4,11 @@ import os
 import asyncio
 import logging
 import requests
+import base64
 from aiohttp import web
 from utils.database import Database
 
-# ログ設定
+# ログ設定 (詳細な情報を見やすく出力)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s | %(levelname)s | %(message)s')
 
 # インテント設定（全権限付与）
@@ -22,24 +23,26 @@ class RumiaBot(commands.Bot):
             case_insensitive=True
         )
         self.db = Database()
-        # 環境変数 ADMIN_IDS が空の場合のエラー回避
+        # 環境変数 ADMIN_IDS から管理者IDリストを作成
         admin_env = os.getenv("ADMIN_IDS", "")
         self.admin_ids = [int(id) for id in admin_env.split(",") if id.isdigit()]
 
     async def setup_hook(self):
-        # 0. Health Check用Webサーバーの起動 (Koyeb対策)
+        """Bot起動時の初期化処理"""
+        
+        # 0. Health Check用Webサーバーの起動 (Koyebが落とさないようにする)
         await self.start_health_check_server()
 
-        # 1. リソースの準備
+        # 1. リソースの準備 (フォント・Cookie)
         self.prepare_resources()
         
         # 2. データベース接続
         await self.db.connect()
         
-        # 3. Cogのロード
+        # 3. Cog (機能拡張) のロード
         await self.load_extensions()
         
-        # 4. コマンド同期
+        # 4. コマンドツリーの同期
         await self.tree.sync()
         logging.info("🌳 コマンドツリーを同期しました。")
 
@@ -60,16 +63,15 @@ class RumiaBot(commands.Bot):
         logging.info("🌍 Health Check Server started on port 8000")
 
     def prepare_resources(self):
-        """フォントのダウンロードとCookieファイルの生成"""
+        """フォントのダウンロードとCookieファイルの復元"""
+        # --- フォント準備 ---
         if not os.path.exists("fonts"):
             os.makedirs("fonts")
         font_path = "fonts/NotoSansJP-Bold.ttf"
         
-        # フォントがない場合のみダウンロード (起動時間短縮)
         if not os.path.exists(font_path):
             logging.info("📥 フォントをダウンロード中...")
             try:
-                # 軽量かつ確実なGoogle Fonts URL
                 url = "https://github.com/google/fonts/raw/main/ofl/notosansjp/NotoSansJP-Bold.ttf"
                 r = requests.get(url, allow_redirects=True)
                 with open(font_path, "wb") as f:
@@ -78,14 +80,24 @@ class RumiaBot(commands.Bot):
             except Exception as e:
                 logging.error(f"❌ フォントDL失敗: {e}")
 
-        # YouTube Cookies
+        # --- Cookie準備 (Base64対応) ---
         cookie_env = os.getenv("YOUTUBE_COOKIES")
         if cookie_env:
             logging.info("🍪 環境変数からcookies.txtを生成中...")
-            with open("cookies.txt", "w") as f:
-                f.write(cookie_env)
+            try:
+                # Base64としてデコードを試みる (これが推奨)
+                decoded_cookie = base64.b64decode(cookie_env).decode('utf-8')
+                with open("cookies.txt", "w") as f:
+                    f.write(decoded_cookie)
+                logging.info("✅ Cookie (Base64) の復元に成功しました")
+            except Exception:
+                # Base64じゃない場合（そのまま書き込み・改行崩れのリスクあり）
+                logging.warning("⚠️ Base64デコードに失敗。生テキストとして保存します。")
+                with open("cookies.txt", "w") as f:
+                    f.write(cookie_env)
 
     async def load_extensions(self):
+        """cogsフォルダ内の拡張機能をロード"""
         for filename in os.listdir('./cogs'):
             if filename.endswith('.py'):
                 try:
@@ -105,6 +117,7 @@ class RumiaBot(commands.Bot):
 
 bot = RumiaBot()
 
+# --- グローバルエラーハンドリング ---
 @bot.tree.error
 async def on_app_command_error(interaction: discord.Interaction, error: discord.app_commands.AppCommandError):
     if isinstance(error, discord.app_commands.CommandOnCooldown):
@@ -113,7 +126,7 @@ async def on_app_command_error(interaction: discord.Interaction, error: discord.
         await interaction.response.send_message("❌ 権限が不足しています。", ephemeral=True)
     else:
         logging.error(f"Command Error: {error}")
-        # インタラクションが既に終了している場合はfollowupを使う
+        # インタラクションが既に終了しているか確認して送信
         if interaction.response.is_done():
             await interaction.followup.send(f"❌ エラーが発生しました: {error}", ephemeral=True)
         else:
@@ -122,6 +135,6 @@ async def on_app_command_error(interaction: discord.Interaction, error: discord.
 if __name__ == "__main__":
     token = os.getenv("DISCORD_TOKEN")
     if not token:
-        logging.error("❌ DISCORD_TOKENが見つかりません。")
+        logging.error("❌ DISCORD_TOKENが見つかりません。環境変数を確認してください。")
     else:
         bot.run(token)
